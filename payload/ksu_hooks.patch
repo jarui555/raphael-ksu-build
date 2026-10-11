@@ -1,0 +1,127 @@
+--- a/kernel/reboot.c
++++ b/kernel/reboot.c
+@@ -280,6 +280,10 @@
+ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
+ 		void __user *, arg)
+ {
++#ifdef CONFIG_KSU
++	extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);
++	ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
++#endif
+ 	struct pid_namespace *pid_ns = task_active_pid_ns(current);
+ 	char buffer[256];
+ 	int ret = 0;
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -1868,12 +1868,20 @@
+ 	return retval;
+ }
+ 
++#ifdef CONFIG_KSU
++extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
++			       void *argv, void *envp, int *flags);
++#endif
++
+ int do_execve(struct filename *filename,
+ 	const char __user *const __user *__argv,
+ 	const char __user *const __user *__envp)
+ {
+ 	struct user_arg_ptr argv = { .ptr.native = __argv };
+ 	struct user_arg_ptr envp = { .ptr.native = __envp };
++#ifdef CONFIG_KSU
++	ksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);
++#endif
+ 	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
+ }
+ 
+@@ -1884,6 +1892,9 @@
+ {
+ 	struct user_arg_ptr argv = { .ptr.native = __argv };
+ 	struct user_arg_ptr envp = { .ptr.native = __envp };
++#ifdef CONFIG_KSU
++	ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
++#endif
+ 
+ 	return do_execveat_common(fd, filename, argv, envp, flags);
+ }
+@@ -1901,6 +1912,9 @@
+ 		.is_compat = true,
+ 		.ptr.compat = __envp,
+ 	};
++#ifdef CONFIG_KSU
++	ksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);
++#endif
+ 	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
+ }
+ 
+@@ -1917,6 +1931,9 @@
+ 		.is_compat = true,
+ 		.ptr.compat = __envp,
+ 	};
++#ifdef CONFIG_KSU
++	ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
++#endif
+ 	return do_execveat_common(fd, filename, argv, envp, flags);
+ }
+ #endif
+--- a/fs/open.c
++++ b/fs/open.c
+@@ -361,6 +361,11 @@
+  */
+ SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
+ {
++#ifdef CONFIG_KSU
++	extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,
++				      int *mode, int *__unused_flags);
++	ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
++#endif
+ 	const struct cred *old_cred;
+ 	struct cred *override_cred;
+ 	struct path path;
+--- a/fs/stat.c
++++ b/fs/stat.c
+@@ -354,9 +354,15 @@
+ }
+ 
+ #if !defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_SYS_NEWFSTATAT)
++#ifdef CONFIG_KSU
++extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);
++#endif
+ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
+ 		struct stat __user *, statbuf, int, flag)
+ {
++#ifdef CONFIG_KSU
++	ksu_handle_stat(&dfd, &filename, &flag);
++#endif
+ 	struct kstat stat;
+ 	int error;
+ 
+@@ -369,6 +375,12 @@
+ 
+ SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)
+ {
++#ifdef CONFIG_KSU
++	{
++		const char __user *fn = NULL;
++		ksu_handle_stat((int *)&fd, &fn, NULL);
++	}
++#endif
+ 	struct kstat stat;
+ 	int error = vfs_fstat(fd, &stat);
+ 
+--- a/kernel/sys.c
++++ b/kernel/sys.c
+@@ -597,6 +597,13 @@
+  */
+ SYSCALL_DEFINE3(setresuid, uid_t, ruid, uid_t, euid, uid_t, suid)
+ {
++#ifdef CONFIG_KSU
++	{
++		kuid_t old_kuid = current_uid();
++		extern int ksu_handle_setresuid(uid_t old_uid, uid_t new_uid);
++		ksu_handle_setresuid(from_kuid(current_user_ns(), old_kuid), ruid);
++	}
++#endif
+ 	struct user_namespace *ns = current_user_ns();
+ 	const struct cred *old;
+ 	struct cred *new;
