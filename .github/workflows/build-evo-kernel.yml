@@ -339,6 +339,32 @@ jobs:
           grep -q '^CONFIG_LTO_NONE=' .config || echo 'CONFIG_LTO_NONE=y' >> .config
           grep -E "^CONFIG_LTO" .config
 
+          # ---------- 关闭模块签名（insmod 未签名 .ko 的前提） ----------
+          # vendor/sm8150-perf_defconfig 官方原配：
+          #   CONFIG_MODULE_SIG=y / CONFIG_MODULE_SIG_FORCE=y / _SHA256=y
+          #   签名密钥 certs/signing_key.pem 由官方构建持有，我们没有。
+          # FORCE=y ⇒ 加载未签名模块直接 EKEYREJECTED。
+          # 关闭后仅记 taint，不影响加载。
+          echo ""
+          echo "########## 关闭 MODULE_SIG / MODULE_SIG_FORCE ##########"
+          sed -i 's/^CONFIG_MODULE_SIG=y/# CONFIG_MODULE_SIG is not set/' .config
+          sed -i 's/^CONFIG_MODULE_SIG_FORCE=y/# CONFIG_MODULE_SIG_FORCE is not set/' .config
+          grep -E "MODULE_SIG" .config | head -5
+
+          # ---------- 收缩 UTS_RELEASE（vermagic 原位可 patch 的前提） ----------
+          # 树默认 LOCALVERSION_AUTO=y ⇒ UTS_RELEASE 追加 -g<git-hash>-dirty，
+          # 我们因改了 Makefile/.config 必然带 -dirty：
+          #   4.14.357-openela-perf-g603549275bc6-dirty = 40 字符
+          #   vermagic = 40 + " SMP preempt mod_unload modversions aarch64"(43) = 83 字符
+          # 超出 .ko modinfo 内原 vermagic 串（69 字符）的可替换空间。
+          # 关掉 AUTO ⇒ UTS_RELEASE = 4.14.357-openela-perf（63 字符，+NUL=64），
+          # vermagic 恰好 64 字节内，且消除 dirty 噪声、多次构建可复现。
+          echo ""
+          echo "########## 关闭 LOCALVERSION_AUTO（收缩 vermagic） ##########"
+          sed -i 's/^CONFIG_LOCALVERSION_AUTO=y/# CONFIG_LOCALVERSION_AUTO is not set/' .config
+          printf '%s\n' "  CONFIG_LOCALVERSION      = $(grep -E '^CONFIG_LOCALVERSION=' .config)"
+          printf '%s\n' "  LOCALVERSION_AUTO        = $(grep -E '^CONFIG_LOCALVERSION_AUTO=|^# CONFIG_LOCALVERSION_AUTO' .config)"
+
           # ---------- 本次不注入 KSU ----------
           echo ""
           echo "########## KSU 保持关闭（先验证树本身）##########"
