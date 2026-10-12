@@ -1,9 +1,8 @@
-
 #
-# KernelSU-Next
+# KernelSU-Next  [测试版：DISABLED —— 二分定位 bootloop]
 #
-CONFIG_KSU=y
-CONFIG_KSU_MANUAL_HOOK=y
+# CONFIG_KSU is not set
+# CONFIG_KSU_MANUAL_HOOK is not set
 # CONFIG_KSU_DEBUG is not set
 # CONFIG_KSU_DISABLE_MANAGER is not set
 # CONFIG_KSU_DISABLE_POLICY is not set
