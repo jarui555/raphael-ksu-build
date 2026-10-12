@@ -11,7 +11,8 @@ name: Build raphael kernel (KernelSU-Next)
 #   1. clone 内核源码
 #   2. 应用 KSU manual hook 补丁（ksu_hooks.patch）
 #   3. 注入 KernelSU-Next 源码（drivers/kernelsu）
-#   4. 准备工具链（AOSP clang-r383902 + GCC 4.9）
+#   4. 准备工具链（AOSP clang-r487747c = clang 17 + GCC 4.9）
+#      v2 变更：clang-r383902(11.0.1) -> clang-r487747c(17.0.0)
 #   5. 生成 .config
 #   6. 编译 Image.gz
 #   7. 上传 artifact
@@ -93,37 +94,64 @@ jobs:
           bash "$GITHUB_WORKSPACE/_ci/payload/drivers_inject.sh"
 
       # ---------- 5. 工具链 ----------
-      - name: Clone AOSP clang (r383902)
+      # 【v2 关键变更】clang 11.0.1 (r383902) -> clang 17.0.0 (r487747c)
+      #
+      # 变更理由（三层证据）：
+      #   1) 上一轮刷入 clang11 编译的内核后 bootloop（logo→黑屏2s→logo 循环），
+      #      排除法定位到 clang 版本是唯一实质差异：
+      #        AVB algorithm_type=0 无签名 ✗ / ramdisk sha256 一致 ✗ /
+      #        DTB 446802 一致 ✗ / defconfig 与真机 IKCONFIG diff=0 ✗ /
+      #        LTO 两边均 NONE ✗  ⇒ 只剩 clang 版本 ⚠️
+      #   2) 目标外挂 Mini_hook_extracted.ko 的 .comment = "clang version 17.0.0"
+      #      ⇒ clang 17 已被证明能编出「可被 4.14 内核加载」的模块产物
+      #   3) 真机 Zundamon Evo 用 clang 22，我们 CI 用 clang 11，跨度过大；
+      #      clang 17 是 AOSP 官方仍在维护、且与 4.14 内核兼容性最好的中位版本
+      #
+      # 版本可用性（已实测 AOSP prebuilts/clang/host/linux-x86 分支）：
+      #   android14-release / android14-qpr1 / android14-qpr2 / android-15.0.0_r1
+      #     均含 clang-r487747c ✓
+      - name: Clone AOSP clang (r487747c = clang 17)
         run: |
           set -e
           cd "$GITHUB_WORKSPACE"
           echo ">>> 稀疏 clone AOSP prebuilts/clang"
           git clone --depth=1 --filter=blob:none --sparse \
-            -b android-11.0.0_r48 \
+            -b android14-release \
             https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
             clang-aosp 2>&1 | tail -3 || {
-              echo "!!! android-11.0.0_r48 不存在，改用 main"
+              echo "!!! android14-release 不存在，改用 android-15.0.0_r1"
               git clone --depth=1 --filter=blob:none --sparse \
+                -b android-15.0.0_r1 \
                 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
                 clang-aosp
             }
           cd clang-aosp
-          git sparse-checkout set clang-r383902 2>&1 | tail -3
-          ls -la clang-r383902/bin/clang || echo "!!! clang 二进制缺失"
-          ./clang-r383902/bin/clang --version | head -2
+          git sparse-checkout set clang-r487747c 2>&1 | tail -3
+          ls -la clang-r487747c/bin/clang || {
+            echo "!!! clang-r487747c 二进制缺失，回退 clang-r475365b"
+            git sparse-checkout set clang-r475365b
+          }
+          # 实际使用的 clang 目录（供后续步骤引用，避免硬编码）
+          CLANGDIR=$(ls -d clang-r487747c 2>/dev/null || ls -d clang-r475365b)
+          echo "$GITHUB_WORKSPACE/clang-aosp/$CLANGDIR" > /tmp/clangdir.txt
+          echo "CLANGDIR=$CLANGDIR"
+          ./$CLANGDIR/bin/clang --version | head -4
 
           # ---------- 生成 clang 工具链 wrapper ----------
-          # 【必须带 --target】诊断结论（run #6 实测）：
-          #   裸 clang -fstack-protector-strong                       -> OK
-          #   clang --target=... -fstack-protector-strong             -> OK
-          #   clang --target=... + arm64 flags -fstack-protector-strong -> OK
-          #   clang（无 target）+ arm64 flags -fstack-protector-strong  -> FAIL
-          #       clang-11: error: argument unused during compilation:
-          #                 '-mgeneral-regs-only' [-Werror,-Wunused-command-line-argument]
-          # 即：必须让 clang 以 aarch64 target 运行，否则 -mgeneral-regs-only
-          # 会被当成「未使用参数」被 -Werror 拒绝，导致 cc-option 探测失败，
-          # 进而 kernel/Makefile:1348 prepare-compiler-check 报
-          #   "Cannot use CONFIG_CC_STACKPROTECTOR_STRONG"
+          # 【v2 变更】--target 注入仍然保留：clang 17 对 -mgeneral-regs-only 的
+          #   处理与 clang 11 一致（aarch64 target 下才认为该 flag 有效），
+          #   且 -Wunused-command-line-argument 依然会被 -Werror 放大。
+          #   历史诊断（run #6，clang 11 时期）：
+          #     裸 clang -fstack-protector-strong                       -> OK
+          #     clang --target=... -fstack-protector-strong             -> OK
+          #     clang --target=... + arm64 flags -fstack-protector-strong -> OK
+          #     clang（无 target）+ arm64 flags -fstack-protector-strong  -> FAIL
+          #         clang-11: error: argument unused during compilation:
+          #                   '-mgeneral-regs-only' [-Werror,-Wunused-command-line-argument]
+          #   即：必须让 clang 以 aarch64 target 运行，否则 -mgeneral-regs-only
+          #   会被当成「未使用参数」被 -Werror 拒绝，导致 cc-option 探测失败，
+          #   进而 kernel/Makefile:1348 prepare-compiler-check 报
+          #     "Cannot use CONFIG_CC_STACKPROTECTOR_STRONG"
           #
           # Kbuild 理论上会自己加（Makefile:525 CLANG_FLAGS += --target=...），
           # 但实测该路径未生效（疑似 cc-name/CROSS_COMPILE 判定问题）。
@@ -132,7 +160,9 @@ jobs:
           echo ">>> 生成 clang/工具链 wrapper（注入 aarch64 target）"
           WRAP="$GITHUB_WORKSPACE/wrap"
           mkdir -p "$WRAP"
-          CB="$GITHUB_WORKSPACE/clang-aosp/clang-r383902/bin"
+          CB=$(cat /tmp/clangdir.txt)/bin
+          echo "CB=$CB"
+          ls "$CB" | head -20
           for t in clang clang++ ld.lld llvm-ar llvm-nm llvm-objcopy \
                    llvm-objdump llvm-readelf llvm-strip llvm-ranlib; do
             [ -x "$CB/$t" ] || continue
@@ -403,6 +433,49 @@ jobs:
             || echo "  !! make -n drivers/ 未见 kernelsu（说明未被收集）"
           echo "########## 诊断结束 ##########"
 
+          # ---------- ★ v2 新增：模块支持硬断言 ----------
+          # 目的：在动手编译前就确认「本次内核真的会带模块子系统」。
+          # 背景：device.config 里写了 CONFIG_MODULES=y，但 Zundamon Evo 真机
+          #   的 /proc/config.gz 同样写 =y，实际却因 cond_syscall 弱符号桩而
+          #   完全不可用（/proc/modules 不存在、sys_init_module 返回 -ENOSYS）。
+          #   因此不能只信 .config 文本，必须查 auto.conf（Kconfig 求解后的
+          #   真实结果）+ 检查 Kconfig 依赖是否把 MODULES 裁掉。
+          echo ""
+          echo "########## ★ 模块支持硬断言 ##########"
+          MOD_OK=1
+          for sym in CONFIG_MODULES CONFIG_MODVERSIONS CONFIG_MODULE_UNLOAD; do
+            if grep -q "^${sym}=y" include/config/auto.conf 2>/dev/null; then
+              echo "  ✓ auto.conf: ${sym}=y"
+            else
+              echo "  ✗✗ auto.conf: ${sym} 未生效！"
+              MOD_OK=0
+            fi
+          done
+          if grep -q "^CONFIG_TRIM_UNUSED_KSYMS=y" include/config/auto.conf 2>/dev/null; then
+            echo "  ✗✗ CONFIG_TRIM_UNUSED_KSYMS=y —— 会裁掉未被内核内部引用的导出符号，"
+            echo "      外挂 .ko 依赖的符号可能消失！必须关闭。"
+            MOD_OK=0
+          else
+            echo "  ✓ CONFIG_TRIM_UNUSED_KSYMS 未开启"
+          fi
+          # 模块子系统启动日志字符串：CONFIG_MODULES=n 时这段代码整体被编译掉
+          echo "  --- 源码侧证据：kernel/module.c 是否会被编译 ---"
+          if grep -q "^CONFIG_MODULES=y" include/config/auto.conf 2>/dev/null; then
+            grep -n "obj-\$(CONFIG_MODULES)" kernel/Makefile | head -3
+          fi
+          echo "  --- kernel/sys_ni.c 的 cond_syscall 桩（若 MODULES=y 则不会真正生效）---"
+          grep -n "cond_syscall" kernel/sys_ni.c | head -5
+          if [ "$MOD_OK" = "0" ]; then
+            echo ""
+            echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+            echo "!! 模块支持断言失败 —— 本次构建出的内核无法加载 .ko"
+            echo "!! 继续编译仅用于收集日志，产物不可用于 insmod"
+            echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+          else
+            echo "  ===> ✓ 模块支持断言全部通过，本次内核应可 insmod 外挂 .ko"
+          fi
+          echo "########## 断言结束 ##########"
+
       # ---------- 7. 编译 ----------
       - name: Build Image.gz
         working-directory: kernel
@@ -459,6 +532,29 @@ jobs:
           echo "===== 尝试 1 退出码: $rc ====="
 
           if [ $rc -ne 0 ]; then
+            # ---- 兜底 A0（v2 新增）：clang 17 对 4.14 老内核的已知不兼容 ----
+            # clang 16+ 默认把「隐式函数声明 / 隐式整型转换」等提升为 error。
+            # 4.14（2017 年代码）大量存在这类写法，会直接编译失败。
+            # 处理：给内核构建注入 -Wno-* 降级开关（KCFLAGS 会被 Kbuild 追加到
+            # 每个 TU 的编译命令行末尾，可覆盖前面的 -Werror）。
+            if grep -qE "error: (implicit|incompatible|use of undeclared|unknown type name)" /tmp/build_out.txt \
+               || grep -q "clang: error:" /tmp/build_out.txt; then
+              echo ""
+              echo "########## 检测到 clang17 严格模式报错 → 注入 -Wno-* 降级后重试 ##########"
+              export KCFLAGS="-Wno-error -Wno-implicit-function-declaration \
+                -Wno-implicit-int -Wno-int-conversion -Wno-incompatible-pointer-types \
+                -Wno-unused-command-line-argument -Wno-unknown-warning-option \
+                -Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration"
+              echo "KCFLAGS=$KCFLAGS"
+              MAKEFLAGS_COMMON="$MAKEFLAGS_COMMON KCFLAGS='-Wno-error -Wno-implicit-function-declaration -Wno-implicit-int -Wno-int-conversion -Wno-incompatible-pointer-types -Wno-error=incompatible-pointer-types'"
+              echo "########## 尝试 1b：clang17 宽松模式 ##########"
+              run_make
+              rc=$?
+              echo "===== 尝试 1b 退出码: $rc ====="
+            fi
+          fi
+
+          if [ $rc -ne 0 ]; then
             # ---- 兜底 A：stack protector 探测失败 → 关掉它再试 ----
             if grep -q "stack-protector-strong not supported\|prepare-compiler-check\|Cannot use CONFIG_CC_STACKPROTECTOR" /tmp/build_out.txt; then
               echo ""
@@ -513,7 +609,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          NM="$GITHUB_WORKSPACE/clang-aosp/clang-r383902/bin/llvm-nm"
+          NM="$(cat /tmp/clangdir.txt 2>/dev/null || echo "$GITHUB_WORKSPACE/clang-aosp/clang-r487747c")/bin/llvm-nm"
           if [ ! -f vmlinux ]; then
             echo "✗ vmlinux 不存在 —— 编译未产出，跳过符号校验"
             echo "（详见上一步 Build Image.gz 的完整日志）"
@@ -531,9 +627,32 @@ jobs:
             echo "✗ 警告：未找到 KSU 符号"
           fi
           echo ""
-          echo "=== vermagic ==="
-          "$GITHUB_WORKSPACE/clang-aosp/clang-r383902/bin/llvm-strings" vmlinux 2>/dev/null \
+          echo "=== vermagic（关键：外挂 .ko 需匹配 SMP preempt mod_unload modversions aarch64）==="
+          "$NM" vmlinux 2>/dev/null | grep -i "vermagic" || true
+          "$(dirname "$NM")/llvm-strings" vmlinux 2>/dev/null \
             | grep -m3 "SMP preempt" || true
+          echo ""
+          echo "=== ★ 模块子系统自检（v2 新增，决定能否 insmod 外挂 .ko）==="
+          echo "--- [1] /proc/modules 注册相关符号 ---"
+          "$NM" vmlinux 2>/dev/null | grep -E " (T|t|D|d|R|r|B|b) (__register_chrdev|module_layout|load_module|free_module|do_init_module)$" || echo "  (无)"
+          echo "--- [2] 关键模块加载器字符串（必须存在，否则 CONFIG_MODULES=n）---"
+          for s in "module_layout" "Unknown symbol" "bad vermagic" \
+                   "disagrees about version of symbol" "no symbol version for" \
+                   "modules_disabled" "Loading module from fd" \
+                   "module is already loaded" "Failed to allocate memory for module"; do
+            if "$(dirname "$NM")/llvm-strings" vmlinux 2>/dev/null | grep -qF "$s"; then
+              echo "  ✓ $s"
+            else
+              echo "  ✗ $s   <-- 缺失"
+            fi
+          done
+          echo "--- [3] 导出符号数（CONFIG_MODULES=y 时应有数千个 __ksymtab 条目）---"
+          "$NM" vmlinux 2>/dev/null | grep -c "__ksymtab" || echo 0
+          echo "--- [4] __this_module 段（模块加载必需）---"
+          "$NM" vmlinux 2>/dev/null | grep -i "this_module" || echo "  (无 this_module，正常：那是 .ko 侧节)"
+          echo "--- [5] Module.symvers 生成情况（CONFIG_MODULES=y 且非 LTO 时必有）---"
+          ls -la Module.symvers 2>/dev/null && wc -l Module.symvers \
+            || echo "  ✗✗ Module.symvers 不存在 => CONFIG_MODULES 极可能未生效！"
           echo "=== 产物清单 ==="
           ls -la arch/arm64/boot/ 2>/dev/null || true
           exit 0
@@ -550,6 +669,8 @@ jobs:
             kernel/arch/arm64/boot/Image
             kernel/vmlinux
             kernel/System.map
+            kernel/Module.symvers
             kernel/.config
+            kernel/include/config/auto.conf
             build_full.log
           retention-days: 30
