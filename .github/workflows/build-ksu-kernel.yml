@@ -342,8 +342,25 @@ jobs:
           # 推断：olddefconfig 重算配置时把 CONFIG_KSU 裁掉了，或 auto.conf 未及时更新，
           #   导致 drivers/Makefile 的 obj-$(CONFIG_KSU) 不展开。
           # 做法：olddefconfig 之后硬写 .config，再 syncconfig 重建 auto.conf。
+          # ---------- 【v3 关键修正】KSU 强制回写改为条件化 ----------
+          # 背景：run #26（branch test-no-ksu）想编一版「无 KSU」内核做 bootloop 二分，
+          #   把 config_append.txt 改成 `# CONFIG_KSU is not set`，
+          #   但产物里 auto.conf 仍是 CONFIG_KSU=y、System.map 仍有 243 个 ksu_ 符号。
+          #   根因就是下面的「保险 2」无条件把 `# CONFIG_KSU is not set` 硬改回 =y，
+          #   「保险 3」还会直接往 auto.conf 追加 CONFIG_KSU=y。
+          # ⇒ 二分测试被这套兜底逻辑完全抵消，改动的意图无法生效。
+          # 修正：只在 config_append.txt 显式要求开 KSU 时才启用兜底。
+          #   （正常 main 分支 config_append.txt 写的是 CONFIG_KSU=y，行为与以前完全一致；
+          #     写成 `# CONFIG_KSU is not set` 时则真正关闭，不再被兜底改写。）
           echo ""
-          echo "=== 保险 2：强制回写 KSU 配置 ==="
+          if grep -q "^CONFIG_KSU=y" "$GITHUB_WORKSPACE/_ci/payload/config_append.txt" 2>/dev/null; then
+            echo "=== 保险 2：强制回写 KSU 配置（config_append.txt 要求开 KSU，启用兜底）==="
+          else
+            echo "=== config_append.txt 显式关闭 KSU -> 跳过保险 2/3，保持 CONFIG_KSU 未设置 ==="
+            echo "--- .config 当前 KSU 状态 ---"
+            grep -E "^CONFIG_KSU|^# CONFIG_KSU" .config || echo "  (无 KSU 相关行)"
+          fi
+          if grep -q "^CONFIG_KSU=y" "$GITHUB_WORKSPACE/_ci/payload/config_append.txt" 2>/dev/null; then
           sed -i 's|^# CONFIG_KSU is not set|CONFIG_KSU=y|' .config
           sed -i 's|^# CONFIG_KSU_MANUAL_HOOK is not set|CONFIG_KSU_MANUAL_HOOK=y|' .config
           grep -q "^CONFIG_KSU=" .config || echo "CONFIG_KSU=y" >> .config
@@ -400,6 +417,17 @@ jobs:
             echo "   已补写 auto.conf"
           else
             echo ">> auto.conf 已有 CONFIG_KSU=y，无需兜底"
+          fi
+          fi
+          if ! grep -q "^CONFIG_KSU=y" "$GITHUB_WORKSPACE/_ci/payload/config_append.txt" 2>/dev/null; then
+            echo "--- 已跳过保险 2/3：.config 保持 CONFIG_KSU 未设置（二分测试）---"
+            mkdir -p include/config include/generated
+            # 仍然要跑一次 syncconfig，保证 auto.conf / autoconf.h 与 .config 一致
+            make ARCH=arm64 CC=clang LD=ld.lld LLVM_IAS=1 \
+              CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- \
+              silentoldconfig < /dev/null 2>&1 | tail -8 || true
+            echo "--- auto.conf KSU 状态（应为空）---"
+            grep -E "^CONFIG_KSU" include/config/auto.conf 2>/dev/null || echo "  ✓ auto.conf 无 CONFIG_KSU（已关闭）"
           fi
           echo "--- 最终 auto.conf KSU ---"
           grep -E "^CONFIG_KSU" include/config/auto.conf 2>/dev/null || echo "  !! 仍无"
