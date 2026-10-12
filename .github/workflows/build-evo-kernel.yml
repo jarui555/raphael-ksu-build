@@ -355,6 +355,36 @@ jobs:
             echo "  ! payload 无修复脚本，跳过"
           fi
 
+          # ---------- IPA dump include 路径修复 ----------
+          # run 38211289808 教训：
+          #   ./drivers/platform/msm/ipa/ipa_v3/dump/ipa_reg_dump.h:18
+          #     #include "ipa_i.h"
+          #   ipa_i.h 实际在父目录 ipa_v3/，不在 dump/ 里。
+          #   官方 ipa_v3/Makefile 全文 23 行，只给了：
+          #     ccflags-$(CONFIG_IPA3_REGDUMP) += -I .../ipa_v3/dump
+          #     ccflags-$(CONFIG_IPA3_REGDUMP_SM8150) += -I .../ipa_v3/dump/sm8150
+          #   没有指向父目录 ipa_v3/ 的 -I。
+          #   引号 include 的查找顺序 = 源文件目录 → -I 列表，全落空 → clang fatal error。
+          #   官方 CI 大概率没开 CONFIG_IPA3_REGDUMP 因而从未暴露此问题。
+          #   修复：无条件追加父目录 -I（保留寄存器转储功能，最小改动）。
+          echo ""
+          echo "=== 修复 IPA dump include 路径 ==="
+          IPA_MF="drivers/platform/msm/ipa/ipa_v3/Makefile"
+          if [ -f "$IPA_MF" ]; then
+            if grep -q 'ccflags-y += -I$(srctree)/drivers/platform/msm/ipa/ipa_v3' "$IPA_MF"; then
+              echo "  已有父目录 -I，跳过（幂等）"
+            else
+              echo 'ccflags-y += -I$(srctree)/drivers/platform/msm/ipa/ipa_v3' >> "$IPA_MF"
+              echo "  ✓ 已追加父目录 -I"
+            fi
+            echo "  --- $IPA_MF 尾部 ---"
+            tail -4 "$IPA_MF"
+          else
+            echo "  ! $IPA_MF 不存在，跳过"
+          fi
+          CONFIG_IPA3_REGDUMP_STATE=$(grep -E "^CONFIG_IPA3_REGDUMP=" .config || echo "(未设置)")
+          echo "  $CONFIG_IPA3_REGDUMP_STATE"
+
           # ---------- 两步走 olddefconfig / silentoldconfig ----------
           # run #15 教训：直接 silentoldconfig 会遇 "(NEW)" 提问而失败。
           echo ""
